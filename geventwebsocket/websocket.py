@@ -2,10 +2,10 @@ import struct
 
 from socket import error
 
+from ._compat import string_types, range_type, text_type, b
 from .exceptions import ProtocolError
 from .exceptions import WebSocketError
 from .exceptions import FrameTooLargeException
-
 from .utf8validator import Utf8Validator
 
 
@@ -76,13 +76,13 @@ class WebSocket(object):
         :returns: The utf-8 byte string equivalent of `text`.
         """
 
-        if isinstance(text, str):
-            return text
+        if isinstance(text, bytearray):
+            return text.decode('utf-8')
 
-        if not isinstance(text, unicode):
-            text = unicode(text or '')
+        if not isinstance(text, string_types):
+            text = text_type(text or '')
 
-        return text.encode('utf-8')
+        return b(text)
 
     def _is_valid_close_code(self, code):
         """
@@ -166,7 +166,7 @@ class WebSocket(object):
             raise ProtocolError('Invalid close frame: {0} {1}'.format(
                 header, payload))
 
-        code = struct.unpack('!H', str(payload[:2]))[0]
+        code = struct.unpack('!H', payload[:2])[0]
         payload = payload[2:]
 
         if payload:
@@ -203,15 +203,15 @@ class WebSocket(object):
             raise ProtocolError
 
         if not header.length:
-            return header, ''
+            return header, b''
 
         try:
             payload = self.raw_read(header.length)
         except error:
-            payload = ''
+            payload = b''
         except Exception:
             # TODO log out this exception
-            payload = ''
+            payload = b''
 
         if len(payload) != header.length:
             raise WebSocketError('Unexpected EOF reading frame payload')
@@ -238,7 +238,7 @@ class WebSocket(object):
         if an exception is called. Use `receive` instead.
         """
         opcode = None
-        message = ""
+        message = b""
 
         while True:
             header, payload = self.read_frame()
@@ -285,8 +285,8 @@ class WebSocket(object):
                 break
 
         if opcode == self.OPCODE_TEXT:
-            self.validate_utf8(message)
-            return message
+            self.validate_utf8(b(message))
+            return self._decode_bytes(message)
         else:
             return bytearray(message)
 
@@ -323,21 +323,24 @@ class WebSocket(object):
         if opcode == self.OPCODE_TEXT:
             message = self._encode_bytes(message)
         elif opcode == self.OPCODE_BINARY:
-            message = str(message)
+            message = b(str(message))
 
-        header = Header.encode_header(True, opcode, '', len(message), 0)
+        header = Header.encode_header(True, opcode, b'', len(message), 0)
 
         try:
             self.raw_write(header + message)
         except error:
             raise WebSocketError(MSG_SOCKET_DEAD)
+        except:
+            import ipdb; ipdb.set_trace() 
+            raise
 
     def send(self, message, binary=None):
         """
         Send a frame over the websocket with message as its payload
         """
         if binary is None:
-            binary = not isinstance(message, (str, unicode))
+            binary = not isinstance(message, string_types)
 
         opcode = self.OPCODE_BINARY if binary else self.OPCODE_TEXT
 
@@ -347,7 +350,7 @@ class WebSocket(object):
             self.current_app.on_close(MSG_SOCKET_DEAD)
             raise WebSocketError(MSG_SOCKET_DEAD)
 
-    def close(self, code=1000, message=''):
+    def close(self, code=1000, message=b''):
         """
         Close the websocket and connection, sending the specified code and
         message.  The underlying socket object is _not_ closed, that is the
@@ -360,9 +363,7 @@ class WebSocket(object):
         try:
             message = self._encode_bytes(message)
 
-            self.send_frame(
-                struct.pack('!H%ds' % len(message), code, message),
-                opcode=self.OPCODE_CLOSE)
+            self.send_frame(message, opcode=self.OPCODE_CLOSE)
         except WebSocketError:
             # Failed to write the closing frame but it's ok because we're
             # closing the socket anyway.
@@ -420,18 +421,37 @@ class Header(object):
         payload = bytearray(payload)
         mask = bytearray(self.mask)
 
-        for i in xrange(self.length):
+        for i in range_type(self.length):
             payload[i] ^= mask[i % 4]
 
-        return str(payload)
+        return payload
 
     # it's the same operation
     unmask_payload = mask_payload
 
     def __repr__(self):
-        return ("<Header fin={0} opcode={1} length={2} flags={3} at "
-                "0x{4:x}>").format(self.fin, self.opcode, self.length,
-                                   self.flags, id(self))
+        opcodes = {
+            0: 'continuation(0)',
+            1: 'text(1)',
+            2: 'binary(2)',
+            8: 'close(8)',
+            9: 'ping(9)',
+            10: 'pong(10)'
+        }
+        flags = {
+            0x40: 'RSV1 MASK',
+            0x20: 'RSV2 MASK',
+            0x10: 'RSV3 MASK'
+        }
+
+        return ("<Header fin={0} opcode={1} length={2} flags={3} mask={4} at "
+                "0x{5:x}>").format(
+                    self.fin,
+                    opcodes.get(self.opcode, 'reserved({})'.format(self.opcode)),
+                    self.length,
+                    flags.get(self.flags, 'reserved({})'.format(self.flags)),
+                    self.mask, id(self)
+        )
 
     @classmethod
     def decode_header(cls, stream):
@@ -509,7 +529,7 @@ class Header(object):
         """
         first_byte = opcode
         second_byte = 0
-        extra = ''
+        extra = None
 
         if fin:
             first_byte |= cls.FIN_MASK
@@ -540,4 +560,9 @@ class Header(object):
 
             extra += mask
 
-        return chr(first_byte) + chr(second_byte) + extra
+        if extra:
+            header = (first_byte, second_byte, extra)
+        else:
+            header = (first_byte, second_byte)
+
+        return bytes(bytearray(header))
