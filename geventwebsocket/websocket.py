@@ -560,9 +560,9 @@ class Header(object):
 
             extra += mask
 
-        if extra:
-            header = (first_byte, second_byte, extra)
-        else:
-            header = (first_byte, second_byte)
+        header = bytes((first_byte, second_byte))
 
-        return bytes(bytearray(header))
+        if extra:
+            header += extra
+
+        return header
